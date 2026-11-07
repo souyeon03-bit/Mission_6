@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>화학 실험 반응물 당량 및 투입량 계산기</title>
+  <style>
+    :root {
+      --primary: #276453;
+      --bg: #f8f9fa;
+      --border: #dee2e6;
+      --error: #dc3545;
+    }
+    * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    body { background-color: var(--bg); color: #333; margin: 0; padding: 20px; }
+    .container { max-width: 1000px; margin: 0 auto; background: #fff; padding: 24px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+    h1 { font-size: 24px; margin-top: 0; display: flex; align-items: center; gap: 8px; }
+    .controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+    .unit-select { padding: 6px 12px; font-size: 14px; border: 1px solid var(--border); border-radius: 4px; }
+    
+    table { width: 100%; border-collapse: collapse; margin-bottom: 16px; font-size: 14px; }
+    th, td { border: 1px solid var(--border); padding: 10px; text-align: center; }
+    th { background-color: #f1f3f5; font-weight: 600; }
+    td input { width: 100%; padding: 6px; border: 1px solid var(--border); border-radius: 4px; text-align: center; }
+    td input:focus { outline: 2px solid var(--primary); border-color: transparent; }
+    
+    .row-ref { background-color: #e6fcf5; }
+    .error-text { color: var(--error); font-size: 12px; font-weight: bold; }
+    
+    .btn-group { display: flex; gap: 10px; flex-wrap: wrap; }
+    button { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 14px; transition: opacity 0.2s; }
+    button:hover { opacity: 0.8; }
+    .btn-add { background-color: var(--primary); color: white; }
+    .btn-delete { background-color: var(--error); color: white; padding: 4px 8px; font-size: 12px; }
+    .btn-reset { background-color: #6c757d; color: white; }
+    .btn-export { background-color: #198754; color: white; margin-left: auto; }
+    
+    .pagination { display: flex; justify-content: center; align-items: center; gap: 16px; margin-top: 16px; }
+    .pagination button { background-color: #e9ecef; color: #333; }
+    .pagination button:disabled { opacity: 0.5; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h1>🧪 화학 실험 당량 계산기 ⚗️</h1>
+  
+  <div class="controls">
+    <div>
+      <label for="unit">질량 입력 단위: </label>
+      <select id="unit" class="unit-select">
+        <option value="mg">mg</option>
+        <option value="g">g</option>
+      </select>
+    </div>
+    <button class="btn-export" id="btnExport">결과 CSV 다운로드 📥</button>
+  </div>
+
+  <table id="calcTable">
+    <thead>
+      <tr>
+        <th>구분</th>
+        <th>시약명</th>
+        <th>분자량 (MW)</th>
+        <th>당량 (eq)</th>
+        <th>투입 질량 (<span class="unit-label">mg</span>)</th>
+        <th>물질량 (mmol)</th>
+        <th>작업</th>
+      </tr>
+    </thead>
+    <tbody id="tableBody">
+      <!-- 동적 렌더링 영역 -->
+    </tbody>
+  </table>
+
+  <div class="btn-group">
+    <button class="btn-add" id="btnAdd">반응물 추가 ➕</button>
+    <button class="btn-reset" id="btnReset">초기화 🔄</button>
+  </div>
+
+  <div class="pagination" id="pagination" style="display: none;">
+    <button id="btnPrev">이전</button>
+    <span id="pageInfo">1 / 1</span>
+    <button id="btnNext">다음</button>
+  </div>
+</div>
+
+<script>
+  const STORAGE_KEY = 'chem_calc_data';
+  const ROWS_PER_PAGE = 10;
+  
+  let state = {
+    unit: 'mg',
+    ref: { name: '', mw: '', eq: '1.00', mass: '' },
+    reactants: []
+  };
+  let currentPage = 1;
+
+  // 로컬 스토리지 로드
+  function loadState() {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        state = JSON.parse(saved);
+        // 하위 호환성 및 초기화 방어코드
+        if (!state.reactants) state.reactants = [];
+      } catch (e) {
+        console.error("저장된 데이터 로드 실패", e);
+      }
+    }
+  }
+
+  // 로컬 스토리지 저장
+  function saveState() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }
+
+  // 숫자 검증 유틸
+  function isValidNum(val) {
+    if (val === null || val === undefined || val.toString().trim() === '') return false;
+    const num = Number(val);
+    return !isNaN(num) && num > 0;
+  }
+
+  // 계산 및 렌더링
+  function render() {
+    document.getElementById('unit').value = state.unit;
+    document.querySelectorAll('.unit-label').forEach(el => el.textContent = state.unit);
+
+    const tbody = document.getElementById('tableBody');
+    tbody.innerHTML = '';
+
+    // 기준 물질량(mmol) 계산
+    const isRefValid = isValidNum(state.ref.mw) && isValidNum(state.ref.mass);
+    let refMmol = 0;
+    let refMmolDisplay = '<span class="error-text">숫자 입력 필요</span>';
+    
+    if (isRefValid) {
+      const massMg = state.unit === 'g' ? Number(state.ref.mass) * 1000 : Number(state.ref.mass);
+      refMmol = massMg / Number(state.ref.mw);
+      refMmolDisplay = refMmol.toFixed(2);
+    }
+
+    // 1. 기준 시약 행 렌더링
+    const refTr = document.createElement('tr');
+    refTr.className = 'row-ref';
+    refTr.innerHTML = `
+      <td><strong>기준 시약</strong></td>
+      <td><input type="text" value="${state.ref.name}" oninput="updateRef('name', this.value)" placeholder="예: Benzoic acid"></td>
+      <td><input type="text" value="${state.ref.mw}" oninput="updateRef('mw', this.value)" placeholder="숫자 입력"></td>
+      <td>1.00</td>
+      <td><input type="text" value="${state.ref.mass}" oninput="updateRef('mass', this.value)" placeholder="숫자 입력"></td>
+      <td>${refMmolDisplay}</td>
+      <td>-</td>
+    `;
+    tbody.appendChild(refTr);
+
+    // 2. 반응물 행 페이지네이션 계산
+    const totalReactants = state.reactants.length;
+    const totalPages = Math.max(1, Math.ceil(totalReactants / ROWS_PER_PAGE));
+    if (currentPage > totalPages) currentPage = totalPages;
+
+    const startIndex = (currentPage - 1) * ROWS_PER_PAGE;
+    const endIndex = Math.min(startIndex + ROWS_PER_PAGE, totalReactants);
+    const currentReactants = state.reactants.slice(startIndex, endIndex);
+
+    // 3. 반응 시약 행 렌더링
+    currentReactants.forEach((r, idx) => {
+      const globalIdx = startIndex + idx;
+      
+      let targetMassDisplay = '<span class="error-text">숫자 입력 필요</span>';
+      let targetMmolDisplay = '<span class="error-text">숫자 입력 필요</span>';
+
+      if (isRefValid && isValidNum(r.mw) && isValidNum(r.eq)) {
+        const targetMmol = refMmol * Number(r.eq);
+        targetMmolDisplay = targetMmol.toFixed(2);
+        
+        let targetMass = targetMmol * Number(r.mw);
+        if (state.unit === 'g') targetMass = targetMass / 1000;
+        targetMassDisplay = targetMass.toFixed(2);
+      }
+
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>반응 시약 ${globalIdx + 1}</td>
+        <td><input type="text" value="${r.name}" oninput="updateReactant(${globalIdx}, 'name', this.value)" placeholder="시약명"></td>
+        <td><input type="text" value="${r.mw}" oninput="updateReactant(${globalIdx}, 'mw', this.value)" placeholder="숫자 입력"></td>
+        <td><input type="text" value="${r.eq}" oninput="updateReactant(${globalIdx}, 'eq', this.value)" placeholder="숫자 입력"></td>
+        <td>${targetMassDisplay}</td>
+        <td>${targetMmolDisplay}</td>
+        <td><button class="btn-delete" onclick="deleteReactant(${globalIdx})">삭제 🗑️</button></td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    // 4. 페이지네이션 UI 업데이트
+    const pagination = document.getElementById('pagination');
+    if (totalReactants > ROWS_PER_PAGE) {
+      pagination.style.display = 'flex';
+      document.getElementById('pageInfo').textContent = `${currentPage} / ${totalPages}`;
+      document.getElementById('btnPrev').disabled = currentPage === 1;
+      document.getElementById('btnNext').disabled = currentPage === totalPages;
+    } else {
+      pagination.style.display = 'none';
+    }
+
+    saveState();
+  }
+
+  // 상태 업데이트 함수들
+  function updateRef(key, value) {
+    state.ref[key] = value;
+    render();
+  }
+
+  function updateReactant(idx, key, value) {
+    state.reactants[idx][key] = value;
+    render();
+  }
+
+  function addReactant() {
+    state.reactants.push({ name: '', mw: '', eq: '' });
+    // 행 추가 시 마지막 페이지로 이동
+    currentPage = Math.ceil(state.reactants.length / ROWS_PER_PAGE);
+    render();
+  }
+
+  function deleteReactant(idx) {
+    state.reactants.splice(idx, 1);
+    render();
+  }
+
+  function resetAll() {
+    if (confirm("모든 입력 데이터를 초기화하시겠습니까?")) {
+      state = {
+        unit: 'mg',
+        ref: { name: '', mw: '', eq: '1.00', mass: '' },
+        reactants: []
+      };
+      currentPage = 1;
+      localStorage.removeItem(STORAGE_KEY);
+      render();
+    }
+  }
+
+  function exportCSV() {
+    let csvContent = "data:text/csv;charset=utf-8,\uFEFF";
+    csvContent += `구분,시약명,분자량(MW),당량(eq),투입 질량(${state.unit}),물질량(mmol)\n`;
+    
+    const rows = document.querySelectorAll('#calcTable tr');
+    rows.forEach((row, index) => {
+      if (index === 0) return; // thead 건너뛰기
+      const cols = row.querySelectorAll('td');
+      if (cols.length > 0) {
+        const rowData = Array.from(cols).slice(0, 6).map(col => {
+          // input이 있으면 value를, 없으면 textContent를 추출
+          const input = col.querySelector('input');
+          let text = input ? input.value : col.textContent;
+          text = text.replace(/숫자 입력 필요/g, "N/A").trim();
+          return `"${text}"`;
+        });
+        csvContent += rowData.join(",") + "\n";
+      }
+    });
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", "반응물_계산결과.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
+  // 이벤트 리스너
+  document.getElementById('unit').addEventListener('change', (e) => {
+    state.unit = e.target.value;
+    render();
+  });
+  
+  document.getElementById('btnAdd').addEventListener('click', addReactant);
+  document.getElementById('btnReset').addEventListener('click', resetAll);
+  document.getElementById('btnExport').addEventListener('click', exportCSV);
+  
+  document.getElementById('btnPrev').addEventListener('click', () => {
+    if (currentPage > 1) { currentPage--; render(); }
+  });
+  
+  document.getElementById('btnNext').addEventListener('click', () => {
+    const totalPages = Math.ceil(state.reactants.length / ROWS_PER_PAGE);
+    if (currentPage < totalPages) { currentPage++; render(); }
+  });
+
+  // 초기화 실행
+  loadState();
+  render();
+</script>
+
+</body>
+</html>
